@@ -59,55 +59,28 @@ send postion and velocity.
 
 
 HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
- /*
-	Start with the motor in standstill but powered with nominal
-	run current (AT#1). Move the motor at a medium velocity, e.g., as part of a homing procedure (AT#2).
 
-
-	AT#1:
-		PWM_OFS_AUTO Motor in standstill and actual current scale (CS) is
-		identical to run current (IRUN)
-
-		If standstill reduction is enabled, an initial step
-		pulse switches the drive back to run current or set
-		IHOLD to IRUN.
-
-		Pin VS at operating level.
-		time : 0 <= 2^20 + 2 * 2^18 <= 130ms
-
-	AT#2:
-		PWM_GRAD_AUTO Move motor at a velocity, where a significant
-		amount of back EMF is generated and where the full
-		run current can be reached. Conditions:
-										1.5*PWM_OFS_AUTO*(IRUN+1)/32
-										< PWM_SCALE_SUM
-										< 4*PWM_OFS_AUTO*(IRUN+1)/32
-										PWM_SCALE_SUM < 255.
-		A typical range is 60-300 RPM
-
-		8 full steps are required for a change of +/-1 For a typical motor with
-		PWM_GRAD_AUTO optimum at 50 or less, up
-		to 400 full steps are required when starting from default value 0.
-
-
-
-
-  *
-  * */
 
 	// Current settings
-	// fPWM = 23Khz
+	// fPWM = 24Khz
 	// VM =  10v
 	// RCOIL = 1.6 Ohms
-	// tBlank = .000003
+	// tBlank = 24 cycles
 	// ILower_Limit = tBlank* fPWM * VM / RCOIL
-	// tBlank* fPWM * VM / RCOIL = .431 A
+	// 24 * 2/1024 * 10/1.6 = .293A
 
 
 
-	//PWM_FREQ=%00
-		motor->registers->PWMCONF.Val.BitField.PWM_AUTOSCALE = 1;
-		motor->registers->PWMCONF.Val.BitField.PWM_AUTOGRAD = 1;
+	// GCONF
+	motor->registers.GCONF.Val.BitField.EN_PWM_MODE = 1;
+
+	// PWMCONF
+	motor->registers.PWMCONF.Val.BitField.PWM_AUTOSCALE = 1;
+	motor->registers.PWMCONF.Val.BitField.PWM_FREQ = 0;
+	motor->registers.PWMCONF.Val.BitField.PWM_AUTOGRAD = 1;
+
+	// CHOPCONF
+	motor->registers.CHOPCONF.Val.BitField.TBL = 2;
 }
 
 
