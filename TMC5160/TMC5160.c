@@ -10,7 +10,7 @@
 #include <string.h>
 #include <FreeRTOS.h>
 #include <task.h>
-
+#include <stdio.h>
 
 
 /*
@@ -56,7 +56,9 @@ send postion and velocity.
 
 
 
-
+void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state);
+void rtos_delay(uint32_t delay_ms);
+uint32_t read_status(TMC5160_HandleTypeDef *motor);
 
 HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 
@@ -69,23 +71,61 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	// ILower_Limit = tBlank* fPWM * VM / RCOIL
 	// 24 * 2/1024 * 10/1.6 = .293A
 
+	// Disable motor for setup
+	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
+	motor->registers.GSTAT.Val.Value = read_status(motor);
+	motor->registers.GSTAT.Val.BitField.RESET = 1;
+	motor->registers.GSTAT.Val.BitField.DRV_ERR = 1;
+	motor->registers.GSTAT.Val.BitField.UV_CP = 1;
+	(void)TMC5160_WriteRegister(motor, GSTAT, motor->registers.GSTAT.Val.Value);
 
+	motor->registers.GSTAT.Val.Value = read_status(motor);
 
 	// GCONF
+	uint32_t gconf_read_val = TMC5160_ReadRegister(motor, GCONF);
+	if(gconf_read_val == 0xFFFFFFFF){
+		return HAL_ERROR;
+	}
+	motor->registers.GCONF.Val.Value = gconf_read_val;
 	motor->registers.GCONF.Val.BitField.EN_PWM_MODE = 1;
+	(void)TMC5160_WriteRegister(motor, GCONF, motor->registers.GCONF.Val.Value);
+	motor->registers.GSTAT.Val.Value = read_status(motor);
 
 	// PWMCONF
+	uint32_t pwmconf_read_val = TMC5160_ReadRegister(motor, PWMCONF);
+	if(pwmconf_read_val == 0xFFFFFFFF){
+		return HAL_ERROR;
+	}
+	motor->registers.PWMCONF.Val.Value = pwmconf_read_val;
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOSCALE = 1;
-	motor->registers.PWMCONF.Val.BitField.PWM_FREQ = 0;
+	motor->registers.PWMCONF.Val.BitField.PWM_FREQ = 2;
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOGRAD = 1;
+	(void)TMC5160_WriteRegister(motor, PWMCONF, motor->registers.PWMCONF.Val.Value );
+	uint32_t pwm_res = TMC5160_ReadRegister(motor, PWMCONF);
+	motor->registers.GSTAT.Val.Value = read_status(motor);
+
+	// IHOLD_IRUN
+	motor->registers.IHOLD_IRUN.Val.BitField.IHOLD = 31;
+	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = 31;
+	motor->registers.IHOLD_IRUN.Val.BitField.IHOLDDELAY = 0;
+	(void)TMC5160_WriteRegister(motor, IHOLD_IRUN, motor->registers.IHOLD_IRUN.Val.Value );
+	uint32_t ihold_res = TMC5160_ReadRegister(motor, IHOLD_IRUN);
+	motor->registers.GSTAT.Val.Value = read_status(motor);
 
 	// CHOPCONF
 	motor->registers.CHOPCONF.Val.BitField.TBL = 2;
+	(void)TMC5160_WriteRegister(motor, CHOPCONF, motor->registers.CHOPCONF.Val.Value);
+	uint32_t chop_res = TMC5160_ReadRegister(motor, CHOPCONF);
+	motor->registers.GSTAT.Val.Value = read_status(motor);
+
+	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
+	rtos_delay(200);
+
+	// move
+
+
+	return HAL_OK;
 }
-
-
-
-
 
 
 /*
@@ -96,21 +136,19 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
  @Param *data: Pointer to the data to be written, should be a 4 byte array.
  @Ret HAL_StatusTypeDef
  * */
-HAL_StatusTypeDef TMC5160_WriteRegister(TMC5160_HandleTypeDef *motor, uint8_t reg_addr, uint8_t *data){
+HAL_StatusTypeDef TMC5160_WriteRegister(TMC5160_HandleTypeDef *motor, uint8_t reg_addr, uint32_t data){
 
 	if(motor == NULL || motor->spi == NULL || motor->spi->Instance == NULL){
 		return HAL_ERROR;
 	}
-    // Wait for SPI to be ready with a timeout (e.g., 1 second)
-    uint32_t timeout = HAL_GetTick() + 1000; // 1000 ms
-    while (motor->spi->State != HAL_SPI_STATE_READY) {
-        if (HAL_GetTick() >= timeout) {
-            return HAL_TIMEOUT; // Timeout after 1 second
-        }
-        vTaskDelay(pdMS_TO_TICKS(1)); // Yield for 1 ms
-    }
+	while(motor->spi->State != HAL_SPI_STATE_READY){rtos_delay(1);}
 
-	uint8_t tx_data[5] = {(reg_addr | WRITE_MASK), data[0] , data[1] ,data[2], data[3]};
+	uint8_t tx_data[5];
+	tx_data[0] = (reg_addr | WRITE_MASK);
+	tx_data[1] = (uint8_t)(data >> 24 );
+	tx_data[2] = (uint8_t)(data >> 16 );
+	tx_data[3] = (uint8_t)(data >> 8 );
+	tx_data[4] = (uint8_t)(data);
 
 	return HAL_SPI_Transmit(motor->spi, tx_data, sizeof(tx_data), HAL_MAX_DELAY);
 
@@ -128,19 +166,12 @@ uint32_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint8_t reg_addr){
 	if(motor == NULL || motor->spi == NULL || motor->spi->Instance == NULL){
 		return 0xFFFFFFFF;
 	}
-    // Wait for SPI to be ready with a timeout (e.g., 1 second)
-    uint32_t timeout = HAL_GetTick() + 1000; // 1000 ms
-    while (motor->spi->State != HAL_SPI_STATE_READY) {
-        if (HAL_GetTick() >= timeout) {
-            return (uint32_t)HAL_TIMEOUT; // Timeout after 1 second
-        }
-        vTaskDelay(pdMS_TO_TICKS(1)); // Yield for 1 ms
-    }
 
 
 	uint8_t rx_data[5];
 	uint8_t tx_data[5] = {reg_addr, 0x00, 0x00, 0x00, 0x00};
 
+	// first response can be disposed of
 	if(HAL_SPI_TransmitReceive(motor->spi, tx_data, rx_data, sizeof(rx_data), HAL_MAX_DELAY) != HAL_OK){
 		return 0xFFFFFFFF;
 	}
@@ -153,16 +184,23 @@ uint32_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint8_t reg_addr){
 		uint32_t recieved = ( (rx_data[1] << 24) | (rx_data[2] << 16)| (rx_data[3] << 8) | rx_data[4] );
 		return recieved;
 	}
-
-
 }
 
+void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
+	HAL_GPIO_WritePin(motor->motor_en_port, motor->motor_en_pin, state);
+}
 
+void rtos_delay(uint32_t delay_ms){
+		vTaskDelay(pdMS_TO_TICKS(delay_ms));
+}
 
-
-
-
-
+uint32_t read_status(TMC5160_HandleTypeDef *motor){
+	uint32_t gstat_read_val = TMC5160_ReadRegister(motor, GSTAT);
+	if(gstat_read_val == 0xFFFFFFFF){
+		return 0xFFFFFFFF;
+	}
+	return gstat_read_val;
+}
 
 /*
   Quick Setup:

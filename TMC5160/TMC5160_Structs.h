@@ -909,8 +909,10 @@ typedef struct __attribute__((packed, aligned(4))) {
 
 
 typedef struct{
+		GPIO_TypeDef			*motor_en_port;
 		SPI_HandleTypeDef        *spi;
-		TMC_Registers           registers;
+		uint16_t				 motor_en_pin;
+		TMC_Registers            registers;
 }TMC5160_HandleTypeDef;
 
 
