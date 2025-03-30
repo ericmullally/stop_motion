@@ -65,9 +65,76 @@ typedef enum{
 	PWM_SCALE		= 0x71, // R
 	PWM_AUTO		= 0x72, // R
 	LOST_STEPS		= 0x73, // R
+	REG_MAX			= 0x74
 }TMC5160_reg_addresses;
 
+typedef enum {
+    READ,
+    WRITE,
+    READ_WRITE,
+    READ_WRITE_CLEAR
+} reg_access_t;
 
+// Struct for sparse lookup
+typedef struct {
+	TMC5160_reg_addresses addr;       // Register address
+    reg_access_t access; // Access type
+} RegAccess_t;
+
+// Sparse array of defined registers (47 entries, ~94 bytes)
+static const RegAccess_t reg_access[] = {
+    {GCONF,         READ_WRITE},
+    {GSTAT,         READ_WRITE_CLEAR}, // R + WC
+    {IFCNT,         READ},
+    {SLAVECONF,     WRITE},
+    {IOIN,          READ},             // Default assumption
+    {OUTPUT,        WRITE},            // UART mode specific
+    {X_COMPARE,     WRITE},
+    {OTP_PROG,      WRITE},
+    {OTP_READ,      READ},
+    {FACTORY_CONF,  READ_WRITE},
+    {SHORT_CONF,    WRITE},
+    {DRV_CONF,      WRITE},
+    {GLOBALSCALER,  WRITE},
+    {OFFSET_READ,   READ},
+    {IHOLD_IRUN,    WRITE},
+    {TPOWERDOWN,    WRITE},
+    {TSTEP,         READ},
+    {TPWMTHRS,      WRITE},
+    {TCOOLTHRS,     WRITE},
+    {THIGH,         WRITE},
+    {RAMPMODE,      READ_WRITE},
+    {XACTUAL,       READ_WRITE},
+    {VACTUAL,       READ},
+    {VSTART,        WRITE},
+    {A1,            WRITE},
+    {V1,            WRITE},
+    {AMAX,          WRITE},
+    {VMAX,          WRITE},
+    {DMAX,          WRITE},
+    {D1,            WRITE},
+    {VSTOP,         WRITE},
+    {TZEROWAIT,     WRITE},
+    {XTARGET,       READ_WRITE},
+    {VDCMIN,        WRITE},
+    {SW_MODE,       READ_WRITE},
+    {RAMP_STAT,     READ_WRITE_CLEAR}, // R + WC
+    {XLATCH,        READ},
+    {ENCMODE,       READ_WRITE},
+    {X_ENC,         READ_WRITE},
+    {ENC_CONST,     WRITE},
+    {ENC_STATUS,    READ_WRITE_CLEAR}, // R + WC
+    {ENC_LATCH,     READ},
+    {ENC_DEVIATION, WRITE},
+    {CHOPCONF,      READ_WRITE},
+    {COOLCONF,      WRITE},
+    {DCCTRL,        WRITE},
+    {DRV_STATUS,    READ},
+    {PWMCONF,       WRITE},
+    {PWM_SCALE,     READ},
+    {PWM_AUTO,      READ},
+    {LOST_STEPS,    READ}
+};
 
 
 

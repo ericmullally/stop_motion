@@ -55,10 +55,21 @@ send postion and velocity.
 */
 
 
+static const size_t reg_access_count = sizeof(reg_access) / sizeof(reg_access[0]);
 
-void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state);
-void rtos_delay(uint32_t delay_ms);
-uint32_t read_status(TMC5160_HandleTypeDef *motor);
+
+typedef enum{
+	NULL_MOTOR,
+	REGISTER_ACCESS,
+	COMMUNICATION
+}TMC5160_error_t;
+
+
+static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state);
+static void rtos_delay(uint32_t delay_ms);
+static uint8_t is_readable(TMC5160_reg_addresses reg_addr);
+
+
 
 HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 
@@ -72,14 +83,15 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	// 24 * 2/1024 * 10/1.6 = .293A
 
 	// Disable motor for setup
-	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
-	motor->registers.GSTAT.Val.Value = read_status(motor);
+	TMC5160_motor_enable(motor, GPIO_PIN_SET);
+
+	// Reset flags on start
 	motor->registers.GSTAT.Val.BitField.RESET = 1;
 	motor->registers.GSTAT.Val.BitField.DRV_ERR = 1;
 	motor->registers.GSTAT.Val.BitField.UV_CP = 1;
 	(void)TMC5160_WriteRegister(motor, GSTAT, motor->registers.GSTAT.Val.Value);
 
-	motor->registers.GSTAT.Val.Value = read_status(motor);
+
 
 	// GCONF
 	uint32_t gconf_read_val = TMC5160_ReadRegister(motor, GCONF);
@@ -89,40 +101,62 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	motor->registers.GCONF.Val.Value = gconf_read_val;
 	motor->registers.GCONF.Val.BitField.EN_PWM_MODE = 1;
 	(void)TMC5160_WriteRegister(motor, GCONF, motor->registers.GCONF.Val.Value);
-	motor->registers.GSTAT.Val.Value = read_status(motor);
+
 
 	// PWMCONF
-	uint32_t pwmconf_read_val = TMC5160_ReadRegister(motor, PWMCONF);
-	if(pwmconf_read_val == 0xFFFFFFFF){
-		return HAL_ERROR;
-	}
-	motor->registers.PWMCONF.Val.Value = pwmconf_read_val;
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOSCALE = 1;
 	motor->registers.PWMCONF.Val.BitField.PWM_FREQ = 2;
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOGRAD = 1;
 	(void)TMC5160_WriteRegister(motor, PWMCONF, motor->registers.PWMCONF.Val.Value );
-	uint32_t pwm_res = TMC5160_ReadRegister(motor, PWMCONF);
-	motor->registers.GSTAT.Val.Value = read_status(motor);
+
 
 	// IHOLD_IRUN
-	motor->registers.IHOLD_IRUN.Val.BitField.IHOLD = 31;
-	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = 31;
+	motor->registers.IHOLD_IRUN.Val.BitField.IHOLD = 16;
+	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = 16;
 	motor->registers.IHOLD_IRUN.Val.BitField.IHOLDDELAY = 0;
 	(void)TMC5160_WriteRegister(motor, IHOLD_IRUN, motor->registers.IHOLD_IRUN.Val.Value );
 	uint32_t ihold_res = TMC5160_ReadRegister(motor, IHOLD_IRUN);
-	motor->registers.GSTAT.Val.Value = read_status(motor);
 
 	// CHOPCONF
 	motor->registers.CHOPCONF.Val.BitField.TBL = 2;
 	(void)TMC5160_WriteRegister(motor, CHOPCONF, motor->registers.CHOPCONF.Val.Value);
 	uint32_t chop_res = TMC5160_ReadRegister(motor, CHOPCONF);
-	motor->registers.GSTAT.Val.Value = read_status(motor);
+
+	// VMAX
+	motor->registers.VMAX.Val.Value = 200;
+	(void) TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
 
 	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
-	rtos_delay(200);
 
-	// move
+	//MOVE
+	motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 1;
+	(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
 
+	 rtos_delay(10);
+	// Standstill for 1ms at max current
+	motor->registers.VMAX.Val.Value = 0;
+	(void) TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+	rtos_delay(1);
+
+	//TODO:Motor in standstill and actual current scale (CS) is
+	//	identical to run current (IRUN).
+	//	- If standstill reduction is enabled, an initial step
+	//	pulse switches the drive back to run current or set
+	//	IHOLD to IRUN
+	//
+
+	// start move
+	motor->registers.VMAX.Val.Value = 100;
+	(void) TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+
+	motor->registers.VACTUAL.Val.Value = 50;
+	(void) TMC5160_WriteRegister(motor, VACTUAL, motor->registers.VACTUAL.Val.Value);
+	// monitor  PWM_GRAD_AUTO until it hits 0
+
+	motor->registers.PWM_SCALE.Val.Value = TMC5160_ReadRegister(motor, PWM_SCALE);
+	while(motor->registers.PWM_SCALE.Val.BitField.PWM_SCALE_AUTO != 0){
+		motor->registers.PWM_SCALE.Val.Value = TMC5160_ReadRegister(motor, PWM_SCALE);
+	}
 
 	return HAL_OK;
 }
@@ -164,43 +198,63 @@ HAL_StatusTypeDef TMC5160_WriteRegister(TMC5160_HandleTypeDef *motor, uint8_t re
 uint32_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint8_t reg_addr){
 
 	if(motor == NULL || motor->spi == NULL || motor->spi->Instance == NULL){
-		return 0xFFFFFFFF;
+		return (uint32_t)NULL_MOTOR;
 	}
 
+	if(!is_readable(reg_addr)){
+		return (uint32_t)REGISTER_ACCESS;
+	}
 
 	uint8_t rx_data[5];
 	uint8_t tx_data[5] = {reg_addr, 0x00, 0x00, 0x00, 0x00};
 
 	// first response can be disposed of
 	if(HAL_SPI_TransmitReceive(motor->spi, tx_data, rx_data, sizeof(rx_data), HAL_MAX_DELAY) != HAL_OK){
-		return 0xFFFFFFFF;
+		return (uint32_t)COMMUNICATION;
 	}
 
 	memset(rx_data, 0, sizeof(rx_data) );
 
 	if(HAL_SPI_TransmitReceive(motor->spi, tx_data, rx_data, sizeof(rx_data), HAL_MAX_DELAY) != HAL_OK){
-		return 0xFFFFFFFF;
+		return (uint32_t)COMMUNICATION;
 	}else{
 		uint32_t recieved = ( (rx_data[1] << 24) | (rx_data[2] << 16)| (rx_data[3] << 8) | rx_data[4] );
 		return recieved;
 	}
 }
 
-void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
+static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
 	HAL_GPIO_WritePin(motor->motor_en_port, motor->motor_en_pin, state);
 }
 
-void rtos_delay(uint32_t delay_ms){
+static void rtos_delay(uint32_t delay_ms){
 		vTaskDelay(pdMS_TO_TICKS(delay_ms));
 }
 
-uint32_t read_status(TMC5160_HandleTypeDef *motor){
-	uint32_t gstat_read_val = TMC5160_ReadRegister(motor, GSTAT);
-	if(gstat_read_val == 0xFFFFFFFF){
-		return 0xFFFFFFFF;
-	}
-	return gstat_read_val;
+// Check if a register is readable
+static uint8_t is_readable(TMC5160_reg_addresses reg_addr) {
+
+    for (size_t i = 0; i < reg_access_count; i++) {
+        if (reg_access[i].addr == reg_addr) {
+            return (uint8_t)(reg_access[i].access == READ ||
+                    reg_access[i].access == READ_WRITE ||
+                    reg_access[i].access == READ_WRITE_CLEAR);
+        }
+    }
+    return 0x00; // Default to not readable if not found
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
   Quick Setup:
