@@ -109,7 +109,6 @@ static const RegAccess_t reg_access[] = {
     {VSTART,        WRITE},
     {A1,            WRITE},
     {V1,            WRITE},
-    {AMAX,          WRITE},
     {VMAX,          WRITE},
     {DMAX,          WRITE},
     {D1,            WRITE},

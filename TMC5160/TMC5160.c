@@ -81,9 +81,12 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	// tBlank = 24 cycles
 	// ILower_Limit = tBlank* fPWM * VM / RCOIL
 	// 24 * 2/1024 * 10/1.6 = .293A
-
+	// VSENSE resistor = .075ohms
 	// Disable motor for setup
 	TMC5160_motor_enable(motor, GPIO_PIN_SET);
+
+
+	SPI_Status_t spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
 	// Reset flags on start
 	motor->registers.GSTAT.Val.BitField.RESET = 1;
@@ -91,72 +94,60 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	motor->registers.GSTAT.Val.BitField.UV_CP = 1;
 	(void)TMC5160_WriteRegister(motor, GSTAT, motor->registers.GSTAT.Val.Value);
 
-
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
 	// GCONF
-	uint32_t gconf_read_val = TMC5160_ReadRegister(motor, GCONF);
-	if(gconf_read_val == 0xFFFFFFFF){
-		return HAL_ERROR;
-	}
-	motor->registers.GCONF.Val.Value = gconf_read_val;
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.GCONF.Val.Value, GCONF);
 	motor->registers.GCONF.Val.BitField.EN_PWM_MODE = 1;
 	(void)TMC5160_WriteRegister(motor, GCONF, motor->registers.GCONF.Val.Value);
 
+	// CHOPCONF
+	spi_res = TMC5160_ReadRegister(motor, motor->registers.CHOPCONF.Val.Value, CHOPCONF);
+	motor->registers.CHOPCONF.Val.BitField.MRES = 4;
+	motor->registers.CHOPCONF.Val.BitField.TBL = 1;
+	motor->registers.CHOPCONF.Val.BitField.TOFF = 4;
+	(void)TMC5160_WriteRegister(motor, CHOPCONF, motor->registers.CHOPCONF.Val.Value);
+
+	// TPWMTHRS
+	motor->registers.TPWMTHRS.Val.BitField.TPWMTHRS = 0;
+	(void)TMC5160_WriteRegister(motor, TPWMTHRS, motor->registers.TPWMTHRS.Val.Value );
 
 	// PWMCONF
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOSCALE = 1;
-	motor->registers.PWMCONF.Val.BitField.PWM_FREQ = 2;
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOGRAD = 1;
+	motor->registers.PWMCONF.Val.BitField.PWM_FREQ = 3; // ~23.4 kHz
+	motor->registers.PWMCONF.Val.BitField.PWM_REG = 4;
+	motor->registers.PWMCONF.Val.BitField.PWM_LIM = 15;
+	motor->registers.PWMCONF.Val.BitField.FREEWHEEL = 0;
 	(void)TMC5160_WriteRegister(motor, PWMCONF, motor->registers.PWMCONF.Val.Value );
 
-
 	// IHOLD_IRUN
-	motor->registers.IHOLD_IRUN.Val.BitField.IHOLD = 16;
-	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = 16;
-	motor->registers.IHOLD_IRUN.Val.BitField.IHOLDDELAY = 0;
+	motor->registers.IHOLD_IRUN.Val.BitField.IHOLD = 29;
+	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = 29;
+	motor->registers.IHOLD_IRUN.Val.BitField.IHOLDDELAY = 4;
 	(void)TMC5160_WriteRegister(motor, IHOLD_IRUN, motor->registers.IHOLD_IRUN.Val.Value );
-	uint32_t ihold_res = TMC5160_ReadRegister(motor, IHOLD_IRUN);
 
-	// CHOPCONF
-	motor->registers.CHOPCONF.Val.BitField.TBL = 2;
-	(void)TMC5160_WriteRegister(motor, CHOPCONF, motor->registers.CHOPCONF.Val.Value);
-	uint32_t chop_res = TMC5160_ReadRegister(motor, CHOPCONF);
 
-	// VMAX
-	motor->registers.VMAX.Val.Value = 200;
-	(void) TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+	motor->registers.VMAX.Val.BitField.VMAX = 100000;
+	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+
+	motor->registers.AMAX.Val.BitField.AMAX = 60000;
+	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
+
+	motor->registers.XACTUAL.Val.Value  = 0;
+	(void)TMC5160_WriteRegister(motor, XACTUAL, motor->registers.XACTUAL.Val.Value);
 
 	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
 
-	//MOVE
-	motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 1;
-	(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
+	rtos_delay(100);
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
-	 rtos_delay(10);
-	// Standstill for 1ms at max current
-	motor->registers.VMAX.Val.Value = 0;
-	(void) TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
-	rtos_delay(1);
 
-	//TODO:Motor in standstill and actual current scale (CS) is
-	//	identical to run current (IRUN).
-	//	- If standstill reduction is enabled, an initial step
-	//	pulse switches the drive back to run current or set
-	//	IHOLD to IRUN
-	//
+	motor->registers.XTARGET.Val.BitField.XTARGET = 4000;
+	(void)TMC5160_WriteRegister(motor, XTARGET, motor->registers.XTARGET.Val.Value);
 
-	// start move
-	motor->registers.VMAX.Val.Value = 100;
-	(void) TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
-
-	motor->registers.VACTUAL.Val.Value = 50;
-	(void) TMC5160_WriteRegister(motor, VACTUAL, motor->registers.VACTUAL.Val.Value);
-	// monitor  PWM_GRAD_AUTO until it hits 0
-
-	motor->registers.PWM_SCALE.Val.Value = TMC5160_ReadRegister(motor, PWM_SCALE);
-	while(motor->registers.PWM_SCALE.Val.BitField.PWM_SCALE_AUTO != 0){
-		motor->registers.PWM_SCALE.Val.Value = TMC5160_ReadRegister(motor, PWM_SCALE);
-	}
+	rtos_delay(1000);
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
 
 	return HAL_OK;
 }
@@ -184,7 +175,9 @@ HAL_StatusTypeDef TMC5160_WriteRegister(TMC5160_HandleTypeDef *motor, uint8_t re
 	tx_data[3] = (uint8_t)(data >> 8 );
 	tx_data[4] = (uint8_t)(data);
 
-	return HAL_SPI_Transmit(motor->spi, tx_data, sizeof(tx_data), HAL_MAX_DELAY);
+	HAL_StatusTypeDef res =  HAL_SPI_Transmit(motor->spi, tx_data, sizeof(tx_data), HAL_MAX_DELAY);
+	rtos_delay(1);
+	return res;
 
 }
 
@@ -195,32 +188,41 @@ HAL_StatusTypeDef TMC5160_WriteRegister(TMC5160_HandleTypeDef *motor, uint8_t re
  @Param reg_addr: Address of the register you wish to read.
  @Ret uint32_t: Either the register value or 0xFFFFFFFF indicating an error.
  * */
-uint32_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint8_t reg_addr){
+SPI_Status_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint32_t * reg_val, uint8_t reg_addr){
+
+	SPI_Status_t spi_status = {0};
 
 	if(motor == NULL || motor->spi == NULL || motor->spi->Instance == NULL){
-		return (uint32_t)NULL_MOTOR;
+		spi_status.Val.Value = 0xFF;
+		return spi_status;
 	}
 
 	if(!is_readable(reg_addr)){
-		return (uint32_t)REGISTER_ACCESS;
+		spi_status.Val.Value = 0xFF;
+		return spi_status;
 	}
+
 
 	uint8_t rx_data[5];
 	uint8_t tx_data[5] = {reg_addr, 0x00, 0x00, 0x00, 0x00};
 
 	// first response can be disposed of
 	if(HAL_SPI_TransmitReceive(motor->spi, tx_data, rx_data, sizeof(rx_data), HAL_MAX_DELAY) != HAL_OK){
-		return (uint32_t)COMMUNICATION;
+		spi_status.Val.Value = 0xFF;
+		return spi_status;
 	}
 
 	memset(rx_data, 0, sizeof(rx_data) );
 
 	if(HAL_SPI_TransmitReceive(motor->spi, tx_data, rx_data, sizeof(rx_data), HAL_MAX_DELAY) != HAL_OK){
-		return (uint32_t)COMMUNICATION;
+		spi_status.Val.Value = 0xFF;
+		return spi_status;
 	}else{
-		uint32_t recieved = ( (rx_data[1] << 24) | (rx_data[2] << 16)| (rx_data[3] << 8) | rx_data[4] );
-		return recieved;
+		*reg_val = ( (rx_data[1] << 24) | (rx_data[2] << 16)| (rx_data[3] << 8) | rx_data[4] );
+		spi_status.Val.Value = rx_data[0];
+		return spi_status;
 	}
+
 }
 
 static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
@@ -245,7 +247,7 @@ static uint8_t is_readable(TMC5160_reg_addresses reg_addr) {
 }
 
 
-
+//TODO: Load all the registers using the lookup table
 
 
 

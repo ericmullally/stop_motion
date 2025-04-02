@@ -837,6 +837,24 @@ typedef struct __attribute__((packed, aligned(4))) {
 } LOST_STEPS_Register;
 
 typedef struct __attribute__((packed, aligned(4))) {
+    union {
+        uint8_t Value;
+        struct __attribute__((packed, aligned(4))) {
+        	uint8_t RESET_FLAG       : 1;
+        	uint8_t DRIVER_ERROR     : 1;
+        	uint8_t SG2			     : 1;
+        	uint8_t STANDSTILL       : 1;
+        	uint8_t VELOCITY_REACHED : 1;
+        	uint8_t POSITION_REACHED : 1;
+        	uint8_t STATUS_STOP_L    : 1;
+        	uint8_t STATUS_STOP_R    : 1;
+        } BitField;
+    } Val;
+} SPI_Status_t;
+
+
+
+typedef struct __attribute__((packed, aligned(4))) {
     GCONF_Register GCONF;
     GSTAT_Register GSTAT;
 #ifndef USE_SPI
