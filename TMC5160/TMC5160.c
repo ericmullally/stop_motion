@@ -16,8 +16,17 @@
 #define PWM_FREQUENCY 	24000
 #define MOTOR_VOLTAGE 	10
 #define COIL_RESISTANCE 1.6
-#define BLANK_TIME		24
+#define FCLCK			12000000
+
+/* Current Setting:
+	IRMS = (GLOBALSCALER \ 256) * (CS+1 \ 32) * (VFS / RSENSE) * (1/ sqrt(2))
+	GLOBALSCALER = (IRMS * 256 * 32 * RSENSE * sqrt(2)) /  (CS+1) * VFS
+ * */
+
 #define SENSE_RESISTOR  .075
+#define SENSE_VOLTAGE 	.325
+#define SQRT_2			1.41
+#define CURRENT_SCALE	31
 
 
 
@@ -39,47 +48,26 @@ static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState sta
 static void rtos_delay(uint32_t delay_ms);
 static uint8_t is_readable(TMC5160_reg_addresses reg_addr);
 static TMC5160_return_values_t TMC5160_reset_status(TMC5160_HandleTypeDef *motor);
-
-
-
-/* Current Setting:
- * Set GLOBALSCALER as required to reach maximum motor current at I_RUN=31   NOTE CSActual needed for calculation is in coolstep
- * Set I_RUN as desired up to 31, I_HOLD 70% of I_RUN or lower
- * Set I_HOLD_DELAY to 1 to 15 for smooth standstill current decay
- * Set TPOWERDOWN up to 255 for delayed standstill current reduction
- * Configure Chopper to test current settings
- *
- *
- *  StealthChop Configuration:
- *	GCONF set en_pwm_mode
- *	PWMCONF set pwm_autoscale, set pwm_autograd
- *	PWMCONF select PWM_FREQ with regard to fCLK for 20- 40kHz PWM frequency
- *	CHOPCONF Enable chopper using basic config., e.g.: TOFF=5, TBL=2, HSTART=4, HEND=0
- *	Execute automatic tuning procedure AT
- *	Move the motor by slowly accelerating from 0 to VMAX operation velocity
- * */
+static uint8_t calculate_globalScaler(int desired_rms_current);
 
 
 
 
 
 
+HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
 
-HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
-
-
+	SPI_Status_t spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
 	// Disable motor for setup
 	TMC5160_motor_enable(motor, GPIO_PIN_SET);
-
-	SPI_Status_t spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
 	// Reset flags on start
 	(void)TMC5160_reset_status(motor);
 
 	// GLOBAL_SCALER
-	motor->registers.GLOBAL_SCALER.Val.BitField.GLOBAL_SCALER = 167;
-	(void)TMC5160_WriteRegister(motor, GLOBAL_SCALER, motor->registers.GLOBAL_SCALER.Val.Value);
+	motor->registers.GLOBAL_SCALER.Val.BitField.GLOBAL_SCALER = calculate_globalScaler(2);
+	(void)TMC5160_WriteRegister(motor, GLOBALSCALER, motor->registers.GLOBAL_SCALER.Val.Value);
 
 	// GCONF
 	spi_res = TMC5160_ReadRegister(motor, &motor->registers.GCONF.Val.Value, GCONF);
@@ -91,8 +79,8 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	motor->registers.CHOPCONF.Val.BitField.MRES  = 4; //16
 	motor->registers.CHOPCONF.Val.BitField.TBL   = 1;
 	motor->registers.CHOPCONF.Val.BitField.TOFF  = 4;
-	motor->registers.CHOPCONF.Val.BitField.HEND  = 0;
-	motor->registers.CHOPCONF.Val.BitField.HSTRT = 4;
+	motor->registers.CHOPCONF.Val.BitField.HEND  = 6;
+	motor->registers.CHOPCONF.Val.BitField.HSTRT = 0;
 	(void)TMC5160_WriteRegister(motor, CHOPCONF, motor->registers.CHOPCONF.Val.Value);
 
 	// TPWMTHRS
@@ -108,42 +96,45 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 
 	// IHOLD_IRUN
 	motor->registers.IHOLD_IRUN.Val.BitField.IHOLD = 16;
-	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = 29;
-	motor->registers.IHOLD_IRUN.Val.BitField.IHOLDDELAY = 4;
+	motor->registers.IHOLD_IRUN.Val.BitField.IRUN = CURRENT_SCALE;
+	motor->registers.IHOLD_IRUN.Val.BitField.IHOLDDELAY = 3;
 	(void)TMC5160_WriteRegister(motor, IHOLD_IRUN, motor->registers.IHOLD_IRUN.Val.Value );
 
 	// TPOWERDOWN
 	motor->registers.TPOWERDOWN.Val.BitField.TPOWERDOWN = 3;
 	(void)TMC5160_WriteRegister(motor, TPOWERDOWN, motor->registers.TPOWERDOWN.Val.Value );
 
-	// RAMP MODE
+//	// RAMP MODE
+//	motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 1;
+//	(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
 
-/*     µstep velocity µsteps / s:
- * 			 VMAX_LIMIT = 8388096
-			 v[Hz] = v[TMC] * ( fCLK[Hz]/ 2^24 )
-			 v[TMC] = ( v[Hz] * 2^24 ) / fCLK
- 	 	 	 1,118,481 = 1600 * 2^24 / 12MHz      if its wrong try it with fCLK = 24000
- 	 	 	 1600 Hz = 2236
-
-		µstep acceleration a[Hz/s]:
-			a[Hz/s] = a[TMC] * fCLK[Hz]^2 / ((512*256) * 2^24)
-			a[TMC] = a[Hz/s]  * (( 512 * 256) * 2^24) / fCLK[Hz]^2
-			2,443,359 = 640 * (( 512 * 256) * 2^24 / 12MHz^2     if its wrong try it with fCLK = 24000
-			10 = 640 Hz
-
-*/
-	motor->registers.VMAX.Val.BitField.VMAX = 2236; // 1600 Hz
-	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
-
-	motor->registers.AMAX.Val.BitField.AMAX = 10;
-	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
-
-
-	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
-	rtos_delay(100);
 	return HAL_OK;
 }
 
+HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
+
+	//	// RAMP MODE
+	motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 1;
+	(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
+
+	TMC5160_set_max_acceleration(motor, 2000);
+
+	TMC5160_set_max_velocity(motor, 0);
+
+	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
+	rtos_delay(100);
+
+	TMC5160_set_max_velocity(motor, 1600);
+
+	rtos_delay(5000);
+
+	TMC5160_set_max_velocity(motor, 0);
+
+	rtos_delay(100);
+	TMC5160_motor_enable(motor, GPIO_PIN_SET);
+
+	return HAL_OK;
+}
 
 /*
  @Brief Writes data to the desired register.
@@ -218,10 +209,54 @@ SPI_Status_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint32_t * reg_v
 
 }
 
+void TMC5160_set_max_velocity(TMC5160_HandleTypeDef *motor, int velocity){
+	/*     µstep velocity µsteps / s:
+	  			 VMAX_LIMIT = 8388096 in the register
+				 v[Hz] = v[TMC] * ( fCLK[Hz]/ 2^24 )
+				 v[TMC] = ( v[Hz] * 2^24 ) / fCLK
+	 	 	 	 2236 = 1600 * 2^24 / 12MHz
+	 	 	 	 1600 Hz = 2236
+	 	 	 	 velocity of 1Hz is 3200 = 200 full steps for 1 rotation * 16usteps
+	*/
+	int const MAX_VELOCITY = 5999633; // user max requestable value
+
+	if(velocity > MAX_VELOCITY) velocity = MAX_VELOCITY;
+	if(velocity < 0) velocity = 0;
+	uint64_t numerator = ((uint64_t)velocity * (1 << 24)); // max value can surpass 32 bits
+	int velocity_max = (int)( numerator / FCLCK );
+
+	motor->registers.VMAX.Val.BitField.VMAX = velocity_max;
+	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+
+}
+
+void TMC5160_set_max_acceleration(TMC5160_HandleTypeDef *motor, int acceleration){
+//	µstep acceleration a[Hz/s]:
+//	AMAX register = 2^16
+// 		MAX_ACCELERATION = 4291534 for the user
+//		a[Hz/s] = a[TMC] * fCLK[Hz]^2 / ((512*256) * 2^24)
+//		a[TMC] = a[Hz/s]  * (( 512 * 256) * 2^24) / fCLK[Hz]^2
+//		40 = 2000 * (( 512 * 256) * 2^24 / 12MHz^2
+//		40 = 2000 Hz
+
+	int const MAX_ACCELERATION = 4291534; // user max requestable value
+	if(acceleration > MAX_ACCELERATION ) acceleration = MAX_ACCELERATION;
+	if(acceleration < 0 ) acceleration = 0;
+
+	// these magic numbers are from the data sheet.
+	uint64_t numerator = (uint64_t)acceleration * (512 * 256) * (1<< 24);
+	uint64_t denominator = ((uint64_t)FCLCK * FCLCK);
+	int acc_max  = (int)(numerator / denominator);
+
+	motor->registers.AMAX.Val.BitField.AMAX = acc_max;
+	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
+
+}
+
+
 static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
 	HAL_GPIO_WritePin(motor->motor_en_port, motor->motor_en_pin, state);
 }
-
 
 TMC5160_return_values_t TMC5160_reset_status(TMC5160_HandleTypeDef *motor){
 
@@ -250,7 +285,6 @@ TMC5160_return_values_t TMC5160_reset_status(TMC5160_HandleTypeDef *motor){
 	}
 }
 
-
 // Check if a register is readable
 static uint8_t is_readable(TMC5160_reg_addresses reg_addr) {
 
@@ -262,6 +296,13 @@ static uint8_t is_readable(TMC5160_reg_addresses reg_addr) {
         }
     }
     return 0x00; // Default to not readable if not found
+}
+
+static uint8_t calculate_globalScaler(int  desired_rms_current){
+	int GS = (int)((desired_rms_current * 256 * 32 * SENSE_RESISTOR *  SQRT_2) / ((CURRENT_SCALE + 1) * SENSE_VOLTAGE ));
+	if(GS < 0) return 0;
+	if(GS > 255) return 255;
+	return (uint8_t)GS ;
 }
 
 static void rtos_delay(uint32_t delay_ms){
