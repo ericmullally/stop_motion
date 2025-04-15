@@ -20,7 +20,7 @@ SPI_Status_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint32_t * reg_v
 HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor);
 void TMC5160_set_max_velocity(TMC5160_HandleTypeDef *motor, int velocity);
 void TMC5160_set_max_acceleration(TMC5160_HandleTypeDef *motor, int acceleration);
-
+void TMC5160_move_to_position(TMC5160_HandleTypeDef *motor, int full_steps);
 
 
 #ifdef __cplusplus
