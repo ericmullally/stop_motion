@@ -142,7 +142,7 @@ HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 	// perform homing
 
 	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
-	rtos_delay(100);
+	rtos_delay(10);
 
 	return HAL_OK;
 }
@@ -358,7 +358,8 @@ void TMC5160_move_to_position(TMC5160_HandleTypeDef *motor, int full_steps){
  * @Param position: Desired position in usteps.
  * */
 TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, int position){
-	// TODO: timeout may not give enough time to reach position. maybe not let the user set the timeout.
+
+	if(current_max_velocity == 0) current_max_velocity = default_max_velocity;
 
 	uint32_t startTime = HAL_GetTick();
 
@@ -369,16 +370,7 @@ TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, 
 	}
 	uint32_t current_position = motor->registers.XACTUAL.Val.BitField.XACTUAL;
 
-	int displacement; // TODO: subtract out XACTUAL and make it an absolute value
-	uint32_t timeout;
-
-	if(displacement < (16 * 1000)){
-		timeout = 5000;
-	}else{
-		timeout = 1000 * (displacement / current_max_velocity);
-	}
-
-
+	uint32_t timeout  = 500000; // max time in milliseconds to move the full distance at minimum speed.
 
 	while(current_position != position){
 		(void)TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
