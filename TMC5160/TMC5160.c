@@ -6,6 +6,12 @@
  */
 
 
+
+// TODO: When move to position is called the motor performs the move twice. also the calculations
+//       for the XTARGET are off and XACTUAL doesn't appear to be written correctly.
+//			set max velocity and set max acceleration are also incorrect
+
+
 #include "TMC5160.h"
 #include <string.h>
 #include <FreeRTOS.h>
@@ -74,6 +80,10 @@ uint16_t tmc_mres_to_microsteps(uint8_t mres);
  * */
 HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
 
+	// TODO: Can't use position mode until you set all accelerations D1 A1 etc..
+
+
+
 	SPI_Status_t spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
 	// Disable motor for setup
@@ -121,12 +131,7 @@ HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
 	motor->registers.TPOWERDOWN.Val.BitField.TPOWERDOWN = 3;
 	(void)TMC5160_WriteRegister(motor, TPOWERDOWN, motor->registers.TPOWERDOWN.Val.Value );
 
-	// RAMP MODE
-	motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 0; // position mode
-	(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
-
-	TMC5160_set_max_acceleration(motor, default_acceleration);
-	TMC5160_set_max_velocity(motor, default_max_velocity);
+	TMC5160_setup_stealthchop(motor);
 
 	return HAL_OK;
 }
@@ -137,12 +142,35 @@ HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
  * */
 HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
 
-	// enable the motor
-	// wait 100 us
-	// perform homing
+	motor->registers.A1.Val.BitField.A1 =  50;
+	(void)TMC5160_WriteRegister(motor, A1, motor->registers.A1.Val.Value);
+
+	motor->registers.V1.Val.BitField.V1 = 500;
+	(void)TMC5160_WriteRegister(motor, V1, motor->registers.V1.Val.Value);
+
+	motor->registers.AMAX.Val.BitField.AMAX = 150;
+	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
+
+	motor->registers.VMAX.Val.BitField.VMAX = 2000;
+	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+
+
+	motor->registers.DMAX.Val.BitField.DMAX = 150;
+	(void)TMC5160_WriteRegister(motor, DMAX, motor->registers.DMAX.Val.Value);
+
+	motor->registers.D1.Val.BitField.D1 = 50;
+	(void)TMC5160_WriteRegister(motor, D1, motor->registers.D1.Val.Value);
+
+	motor->registers.VSTOP.Val.BitField.VSTOP = 10;
+	(void)TMC5160_WriteRegister(motor, VSTOP, motor->registers.VSTOP.Val.Value);
+
+	// RAMP MODE
+	motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 0; // position mode
+	(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
 
 	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
 	rtos_delay(10);
+	TMC5160_move_to_position(motor, 1600);
 
 	return HAL_OK;
 }
@@ -333,18 +361,21 @@ TMC5160_return_values_t move_for_time(TMC5160_HandleTypeDef *motor, uint32_t tim
  * */
 void TMC5160_move_to_position(TMC5160_HandleTypeDef *motor, int full_steps){
 
+
+	uint16_t microsteps =  tmc_mres_to_microsteps((uint8_t)motor->registers.CHOPCONF.Val.BitField.MRES);
+	TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
+	uint32_t current_position = motor->registers.XACTUAL.Val.BitField.XACTUAL;
+	int total_steps = microsteps * full_steps;
+
 	// Position mode
 	if(motor->registers.RAMPMODE.Val.BitField.RAMPMODE != 0){
 		motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 0;
 	    (void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
 	}
 
+	int target_position = current_position + total_steps;
 
-	uint16_t microsteps =  tmc_mres_to_microsteps((uint8_t)motor->registers.CHOPCONF.Val.BitField.MRES);
-	int total_steps = microsteps * full_steps;
 
-	// The sign of full_steps controls direction
-	int target_position = motor->registers.XACTUAL.Val.BitField.XACTUAL + total_steps;
 	motor->registers.XTARGET.Val.BitField.XTARGET = target_position;
 	(void)TMC5160_WriteRegister(motor, XTARGET, motor->registers.XTARGET.Val.Value);
 
@@ -358,8 +389,6 @@ void TMC5160_move_to_position(TMC5160_HandleTypeDef *motor, int full_steps){
  * @Param position: Desired position in usteps.
  * */
 TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, int position){
-
-	if(current_max_velocity == 0) current_max_velocity = default_max_velocity;
 
 	uint32_t startTime = HAL_GetTick();
 
