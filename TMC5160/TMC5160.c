@@ -8,16 +8,9 @@
 
 
 /* TODO:
- 	 * 	When move to position is called the motor performs the move twice. also the calculations
-        for the XTARGET are off and XACTUAL doesn't appear to be written correctly.
-	    set max velocity and set max acceleration are also incorrect.
-	 *	need a set max velocity function
 	 *	Need a select positioning mode function
 	 *	Need a set velocity mode function
 	 *	Need a state indicator to tell what mode the motor is in now without querying the TMC5160
-
-
-
 */
 
 
@@ -32,8 +25,8 @@
 #define MOTOR_VOLTAGE 		10
 #define COIL_RESISTANCE 	1.6
 #define FCLCK				12000000
-#define MAX_VELOCITY		12000
-
+#define MAX_VELOCITY		8000
+#define MIN_VELOCITY		800
 
 #define SENSE_RESISTOR  0.075
 #define SENSE_VOLTAGE 	0.325
@@ -41,14 +34,13 @@
 #define CURRENT_SCALE	31
 
 
-
+////////////////////////////////////////////////////////////////////////////////////////////////////// PRIVATE VARIABLES ///////////////////////////////////////////////////////
 static const size_t reg_access_count = sizeof(reg_access) / sizeof(reg_access[0]);
-static uint32_t current_velocity = 1600; // usteps/s
-static uint32_t current_acceleration = 2000; // usteps/s^2
+static uint32_t current_velocity = MIN_VELOCITY; // usteps/s
 
 
 
-
+////////////////////////////////////////////////////////////////////////////////////////////////////// PRIVATE TYPES /////////////////////////////////////////////////////////
 typedef enum{
 	TMC5160_SUCCESS 		= 0x00,
 	NULL_MOTOR_ERROR 		= 0x01,
@@ -66,18 +58,19 @@ typedef enum{
 	REVERSE
 }TMC5160_directions_t;
 
-
-static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state);
+ ///////////////////////////////////////////////////////////////////////////////////////////////////// PRIVATE FUNCTIONS /////////////////////////////////////////////////////
 static void rtos_delay(uint32_t delay_ms);
 static uint8_t is_readable(TMC5160_reg_addresses reg_addr);
 static TMC5160_return_values_t TMC5160_reset_status(TMC5160_HandleTypeDef *motor);
 static uint8_t calculate_globalScaler(int desired_rms_current);
+static uint16_t tmc_mres_to_microsteps(uint8_t mres);
+static HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor);
 TMC5160_return_values_t move_for_time(TMC5160_HandleTypeDef *motor, uint32_t time_ms, TMC5160_directions_t direction);
-TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, int position);
-uint16_t tmc_mres_to_microsteps(uint8_t mres);
+static TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, int position);
 
 
 
+/////////////////////////////////////////////////////////////////////////////////////////////////////// PUBLIC FUNCTIONS //////////////////////////////////////////////////////
 
 /*
  * @Brief Write initial motor settings.
@@ -103,14 +96,14 @@ HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
 	(void)TMC5160_WriteRegister(motor, GCONF, motor->registers.GCONF.Val.Value);
 
 	// CHOPCONF
-	spi_res = TMC5160_ReadRegister(motor, &motor->registers.CHOPCONF.Val.Value, CHOPCONF);
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.CHOPCONF.Val.Value, CHOPCONF); // 339772164 339772165
 	motor->registers.CHOPCONF.Val.BitField.MRES  = 4; //16
 	motor->registers.CHOPCONF.Val.BitField.TBL   = 1;
 	motor->registers.CHOPCONF.Val.BitField.TOFF  = 4;
 	motor->registers.CHOPCONF.Val.BitField.HEND  = 6;
 	motor->registers.CHOPCONF.Val.BitField.HSTRT = 0;
 	(void)TMC5160_WriteRegister(motor, CHOPCONF, motor->registers.CHOPCONF.Val.Value);
-
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.CHOPCONF.Val.Value, CHOPCONF);
 
 	// PWMCONF
 	motor->registers.PWMCONF.Val.BitField.PWM_AUTOSCALE = 1;
@@ -129,34 +122,7 @@ HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
 	motor->registers.TPOWERDOWN.Val.BitField.TPOWERDOWN = 3;
 	(void)TMC5160_WriteRegister(motor, TPOWERDOWN, motor->registers.TPOWERDOWN.Val.Value );
 
-	// Speeds for positioning mode
-	motor->registers.A1.Val.BitField.A1 =  50;
-	(void)TMC5160_WriteRegister(motor, A1, motor->registers.A1.Val.Value);
-
-	motor->registers.V1.Val.BitField.V1 = 500;
-	(void)TMC5160_WriteRegister(motor, V1, motor->registers.V1.Val.Value);
-
-	motor->registers.AMAX.Val.BitField.AMAX = 150;
-	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
-
-	motor->registers.VMAX.Val.BitField.VMAX = 2000;
-	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
-
-	motor->registers.DMAX.Val.BitField.DMAX = 150;
-	(void)TMC5160_WriteRegister(motor, DMAX, motor->registers.DMAX.Val.Value);
-
-	motor->registers.D1.Val.BitField.D1 = 50;
-	(void)TMC5160_WriteRegister(motor, D1, motor->registers.D1.Val.Value);
-
-	motor->registers.VSTOP.Val.BitField.VSTOP = 10;
-	(void)TMC5160_WriteRegister(motor, VSTOP, motor->registers.VSTOP.Val.Value);
-
-	// Stealth chop velocity threshold
-	motor->registers.TPWMTHRS.Val.BitField.TPWMTHRS = MAX_VELOCITY;
-	(void)TMC5160_WriteRegister(motor, TPWMTHRS, motor->registers.TPWMTHRS.Val.Value);
-
-	motor->registers.VSTOP.Val.BitField.VSTOP = 10;
-	(void)TMC5160_WriteRegister(motor, VSTOP, motor->registers.VSTOP.Val.Value);
+	(void)TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
 
 	// Application is stealth chop only
 	TMC5160_setup_stealthchop(motor);
@@ -165,19 +131,170 @@ HAL_StatusTypeDef TMC5160_init(TMC5160_HandleTypeDef *motor){
 }
 
 /*
- * @Brief Tune StealthChop for quiet motor movement.
+ * @Brief Changes the motor's travel speed.
+ * @Param motor: Pointer to an instance of the motor struct.
+ * @Param velocity: new maximum travel velocity in usteps/s
+ * */
+void TMC5160_set_max_velocity(TMC5160_HandleTypeDef *motor, int velocity){
+
+	if(velocity > MAX_VELOCITY) {
+		velocity = MAX_VELOCITY;
+	}else if (velocity > 0 && velocity < MIN_VELOCITY){
+		velocity = MIN_VELOCITY;
+	}else if(velocity < 0){
+		velocity = 0;
+	}
+
+	// Speeds for positioning mode
+	motor->registers.A1.Val.BitField.A1 =  (uint16_t)(0.5 * velocity);
+	(void)TMC5160_WriteRegister(motor, A1, motor->registers.A1.Val.Value);
+
+	motor->registers.V1.Val.BitField.V1 = (uint32_t)(0.15 * velocity);
+	(void)TMC5160_WriteRegister(motor, V1, motor->registers.V1.Val.Value);
+
+	motor->registers.AMAX.Val.BitField.AMAX = (uint16_t)(0.6 * velocity);
+	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
+
+	motor->registers.DMAX.Val.BitField.DMAX = motor->registers.AMAX.Val.BitField.AMAX;
+	(void)TMC5160_WriteRegister(motor, DMAX, motor->registers.DMAX.Val.Value);
+
+	motor->registers.D1.Val.BitField.D1 = motor->registers.A1.Val.BitField.A1;
+	(void)TMC5160_WriteRegister(motor, D1, motor->registers.D1.Val.Value);
+
+	current_velocity = velocity;
+	motor->registers.VMAX.Val.BitField.VMAX = velocity;
+	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
+}
+
+/*
+ @Brief Moves the motor at the current velocity for a requested time.
+ @Param motor : pointer to the motor struct
+ @Param time_ms : the time you want to move.
+ @Param direction: The direction to rotate the motor.
+ @Note This function will leave the motor in velocity mode.
+ * */
+TMC5160_return_values_t move_for_time(TMC5160_HandleTypeDef *motor, uint32_t time_ms, TMC5160_directions_t direction){
+
+//	SPI_Status_t status = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
+//
+//	if(!status.Val.BitField.STANDSTILL){
+//		return MOTOR_IN_USE;
+//	}
+//
+//	// Ensure motor doesn't move until ready.
+//	TMC5160_set_max_velocity(motor, 0);
+//
+//	// set velocity mode
+//	if(motor->registers.RAMPMODE.Val.BitField.RAMPMODE == 0){
+//
+//		// Set the direction and velocity mode on.
+//		if(direction == FORWARD){
+//			motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 1;
+//		}else{
+//			motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 2;
+//		}
+//
+//	    if(TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value) != HAL_OK){
+//	    	return COMMUNICATION_ERROR;
+//	    }
+//
+//		// if the motor is disabled we enable it. It wont move until the VMAX is set
+//		if(HAL_GPIO_ReadPin(motor->motor_en_port, motor->motor_en_pin) != GPIO_PIN_RESET){
+//			TMC5160_motor_enable(motor, GPIO_PIN_RESET);
+//			rtos_delay(10);
+//		}
+//
+//	}
+//
+//	// Move the motor at the default velocity
+//	TMC5160_set_max_velocity(motor, default_max_velocity);
+//
+//	// Keep going until finished TODO: This needs a stall guard or sensor feedback. we may hit the end of the machine in production
+//	rtos_delay(time_ms);
+//
+//	// Stop the motor when finished
+//	TMC5160_set_max_velocity(motor, 0);
+}
+
+/*
+ @Brief Moves the motor the number of full steps requested. Forward or reverse is determined but the sign
+ 	 	of the requested number.
+ @Param motor : Pointer to the motor struct.
+ @Param full_steps : Positive or negative number of steps to move.
+ * */
+void TMC5160_move_to_position(TMC5160_HandleTypeDef *motor, int full_steps){
+
+
+	uint16_t microsteps =  tmc_mres_to_microsteps((uint8_t)motor->registers.CHOPCONF.Val.BitField.MRES);
+	(void)TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
+	int current_position = motor->registers.XACTUAL.Val.BitField.XACTUAL;
+	int total_steps = microsteps * full_steps;
+	int target_position;
+
+	TMC5160_set_positioning_mode(motor);
+
+	if((current_position + total_steps) <= 0 ){
+		target_position = 0;
+	}else{
+		target_position = current_position + total_steps;
+	}
+
+	motor->registers.XTARGET.Val.BitField.XTARGET = target_position;
+	(void)TMC5160_WriteRegister(motor, XTARGET, motor->registers.XTARGET.Val.Value);
+
+	(void)TMC5160_wait_for_position(motor, target_position);
+
+}
+
+/*
+ * @Brief Resets the GSTAT register to clear any error flags.
  * @Param motor: Pointer to an instance of the motor struct.
  * */
-HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
-// 	TODO: Will eventually perform homing
+TMC5160_return_values_t TMC5160_reset_status(TMC5160_HandleTypeDef *motor){
 
-	TMC5160_set_max_velocity(motor, current_velocity);
-	TMC5160_set_positioning_mode(motor);
-	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
-	rtos_delay(10);
-	TMC5160_move_to_position(motor, 1600);
+	SPI_Status_t spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
 
-	return HAL_OK;
+	if(spi_res.Val.BitField.DRIVER_ERROR || spi_res.Val.BitField.SG2){
+		return spi_res.Val.BitField.DRIVER_ERROR ? DRIVER_ERROR : STALL_ERROR;
+	}
+
+	// Reset flags must write 1 to clear
+	motor->registers.GSTAT.Val.BitField.RESET = 1;
+	motor->registers.GSTAT.Val.BitField.DRV_ERR = 1;
+	motor->registers.GSTAT.Val.BitField.UV_CP = 1;
+	if(TMC5160_WriteRegister(motor, GSTAT, motor->registers.GSTAT.Val.Value) != HAL_OK){
+		return COMMUNICATION_ERROR;
+	}
+
+	spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
+
+	if(motor->registers.GSTAT.Val.Value == 0){
+		return TMC5160_SUCCESS;
+	}else if(motor->registers.GSTAT.Val.BitField.DRV_ERR || motor->registers.GSTAT.Val.BitField.UV_CP ){
+		return motor->registers.GSTAT.Val.BitField.DRV_ERR ? DRIVER_ERROR : UNDERVOLTAGE_ERROR;
+	}else{
+		return TMC5160_SUCCESS;
+	}
+}
+
+void TMC5160_set_positioning_mode(TMC5160_HandleTypeDef *motor){
+
+	if(motor->registers.RAMPMODE.Val.BitField.RAMPMODE != 0){
+
+		motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 0;
+		(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
+	}
+
+
+}
+
+/*
+ * @Brief Enables or disables the motor via the EN_PIN.
+ * @Param motor: Pointer to an instance of the motor struct.
+ * @Param state: desired pin state, 0 = motor on.
+ * */
+void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
+	HAL_GPIO_WritePin(motor->motor_en_port, motor->motor_en_pin, state);
 }
 
 /*
@@ -253,192 +370,26 @@ SPI_Status_t TMC5160_ReadRegister(TMC5160_HandleTypeDef *motor, uint32_t * reg_v
 
 }
 
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////// PRIVATE FUNCTIONS ////////////////////////////////////////////////////////
+
 /*
- * @Brief Changes the motor's travel speed.
+ * @Brief Tune StealthChop for quiet motor movement.
  * @Param motor: Pointer to an instance of the motor struct.
- * @Param velocity: new maximum travel velocity in usteps/s
  * */
-void TMC5160_set_max_velocity(TMC5160_HandleTypeDef *motor, int velocity){
+static HAL_StatusTypeDef TMC5160_setup_stealthchop(TMC5160_HandleTypeDef *motor){
+// 	TODO: Will eventually perform homing
 
-	if(velocity > MAX_VELOCITY) velocity = MAX_VELOCITY;
-	if(velocity < 0) velocity = 0;
-
-	// Speeds for positioning mode
-	motor->registers.A1.Val.BitField.A1 =  (uint16_t)(0.5 * velocity);
-	(void)TMC5160_WriteRegister(motor, A1, motor->registers.A1.Val.Value);
-
-	motor->registers.V1.Val.BitField.V1 = (uint32_t)(0.15 * velocity);
-	(void)TMC5160_WriteRegister(motor, V1, motor->registers.V1.Val.Value);
-
-	motor->registers.AMAX.Val.BitField.AMAX = (uint16_t)(0.6 * velocity);
-	(void)TMC5160_WriteRegister(motor, AMAX, motor->registers.AMAX.Val.Value);
-
-	motor->registers.DMAX.Val.BitField.DMAX = motor->registers.AMAX.Val.BitField.AMAX;
-	(void)TMC5160_WriteRegister(motor, DMAX, motor->registers.DMAX.Val.Value);
-
-	motor->registers.D1.Val.BitField.D1 = motor->registers.A1.Val.BitField.A1;
-	(void)TMC5160_WriteRegister(motor, D1, motor->registers.D1.Val.Value);
-
-	current_velocity = velocity;
-	motor->registers.VMAX.Val.BitField.VMAX = velocity;
-	(void)TMC5160_WriteRegister(motor, VMAX, motor->registers.VMAX.Val.Value);
-}
-
-
-/*
- @Brief Moves the motor at the current velocity for a requested time.
- @Param motor : pointer to the motor struct
- @Param time_ms : the time you want to move.
- @Param direction: The direction to rotate the motor.
- @Note This function will leave the motor in velocity mode.
- * */
-TMC5160_return_values_t move_for_time(TMC5160_HandleTypeDef *motor, uint32_t time_ms, TMC5160_directions_t direction){
-
-//	SPI_Status_t status = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
-//
-//	if(!status.Val.BitField.STANDSTILL){
-//		return MOTOR_IN_USE;
-//	}
-//
-//	// Ensure motor doesn't move until ready.
-//	TMC5160_set_max_velocity(motor, 0);
-//
-//	// set velocity mode
-//	if(motor->registers.RAMPMODE.Val.BitField.RAMPMODE == 0){
-//
-//		// Set the direction and velocity mode on.
-//		if(direction == FORWARD){
-//			motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 1;
-//		}else{
-//			motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 2;
-//		}
-//
-//	    if(TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value) != HAL_OK){
-//	    	return COMMUNICATION_ERROR;
-//	    }
-//
-//		// if the motor is disabled we enable it. It wont move until the VMAX is set
-//		if(HAL_GPIO_ReadPin(motor->motor_en_port, motor->motor_en_pin) != GPIO_PIN_RESET){
-//			TMC5160_motor_enable(motor, GPIO_PIN_RESET);
-//			rtos_delay(10);
-//		}
-//
-//	}
-//
-//	// Move the motor at the default velocity
-//	TMC5160_set_max_velocity(motor, default_max_velocity);
-//
-//	// Keep going until finished TODO: This needs a stall guard or sensor feedback. we may hit the end of the machine in production
-//	rtos_delay(time_ms);
-//
-//	// Stop the motor when finished
-//	TMC5160_set_max_velocity(motor, 0);
-}
-
-/*
- @Brief Moves the motor the number of full steps requested. Forward or reverse is determined but the sign
- 	 	of the requested number.
- @Param motor : Pointer to the motor struct.
- @Param full_steps : Positive or negative number of steps to move.
- * */
-void TMC5160_move_to_position(TMC5160_HandleTypeDef *motor, int full_steps){
-
-
-	uint16_t microsteps =  tmc_mres_to_microsteps((uint8_t)motor->registers.CHOPCONF.Val.BitField.MRES);
-	(void)TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
-	uint32_t current_position = motor->registers.XACTUAL.Val.BitField.XACTUAL;
-	int total_steps = microsteps * full_steps;
-	int target_position;
-
+	TMC5160_set_max_velocity(motor, current_velocity);
 	TMC5160_set_positioning_mode(motor);
 
-	if((current_position + total_steps) <= 0 ){
-		target_position = 0;
-	}else{
-		target_position = current_position + total_steps;
-	}
+	TMC5160_motor_enable(motor, GPIO_PIN_RESET);
 
-	motor->registers.XTARGET.Val.BitField.XTARGET = target_position;
-	(void)TMC5160_WriteRegister(motor, XTARGET, motor->registers.XTARGET.Val.Value);
+	rtos_delay(10);
+	TMC5160_move_to_position(motor, 200);
 
-	(void)TMC5160_wait_for_position(motor, target_position);
-
+	return HAL_OK;
 }
-
-/*
- * @Brief Waits for XACTUAL to equal XTARGET.
- * @Param motor: Pointer to an instance of the motor struct.
- * @Param position: Desired position in usteps.
- * */
-TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, int position){
-
-	// Start timer for timeout operations
-	uint32_t startTime = HAL_GetTick();
-
-	// check there are no errors.
-	SPI_Status_t  status = TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
-
-	if(status.Val.BitField.DRIVER_ERROR || status.Val.BitField.SG2){
-		return status.Val.BitField.DRIVER_ERROR ? DRIVER_ERROR : STALL_ERROR;
-	}
-
-	// max time in milliseconds to move the full distance at minimum speed.
-	uint32_t timeout  = 500000;
-
-	while(!status.Val.BitField.POSITION_REACHED){
-		status = TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
-		if((HAL_GetTick() - startTime) > timeout){
-			return POSITION_NOT_REACHED;
-		}
-	}
-	return TMC5160_SUCCESS;
-
-}
-
-/*
- * @Brief Resets the GSTAT register to clear any error flags.
- * @Param motor: Pointer to an instance of the motor struct.
- * */
-TMC5160_return_values_t TMC5160_reset_status(TMC5160_HandleTypeDef *motor){
-
-	SPI_Status_t spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
-
-	if(spi_res.Val.BitField.DRIVER_ERROR || spi_res.Val.BitField.SG2){
-		return spi_res.Val.BitField.DRIVER_ERROR ? DRIVER_ERROR : STALL_ERROR;
-	}
-
-	// Reset flags must write 1 to clear
-	motor->registers.GSTAT.Val.BitField.RESET = 1;
-	motor->registers.GSTAT.Val.BitField.DRV_ERR = 1;
-	motor->registers.GSTAT.Val.BitField.UV_CP = 1;
-	if(TMC5160_WriteRegister(motor, GSTAT, motor->registers.GSTAT.Val.Value) != HAL_OK){
-		return COMMUNICATION_ERROR;
-	}
-
-	spi_res = TMC5160_ReadRegister(motor, &motor->registers.GSTAT.Val.Value, GSTAT);
-
-	if(motor->registers.GSTAT.Val.Value == 0){
-		return TMC5160_SUCCESS;
-	}else if(motor->registers.GSTAT.Val.BitField.DRV_ERR || motor->registers.GSTAT.Val.BitField.UV_CP ){
-		return motor->registers.GSTAT.Val.BitField.DRV_ERR ? DRIVER_ERROR : UNDERVOLTAGE_ERROR;
-	}else{
-		return TMC5160_SUCCESS;
-	}
-}
-
-
-void TMC5160_set_positioning_mode(TMC5160_HandleTypeDef *motor){
-
-	if(motor->registers.RAMPMODE.Val.BitField.RAMPMODE != 0){
-
-		motor->registers.RAMPMODE.Val.BitField.RAMPMODE = 0;
-		(void)TMC5160_WriteRegister(motor, RAMPMODE, motor->registers.RAMPMODE.Val.Value);
-	}
-
-
-}
-
-///////////////////////////////////////////////////////////////////////////////////// PRIVATE FUNCTIONS ////////////////////////////////////
 
 /*
  * @Brief Makes sure a requested register is readable using the register access lookup table.
@@ -482,24 +433,43 @@ static void rtos_delay(uint32_t delay_ms){
 }
 
 /*
- * @Brief Enables or disables the motor via the EN_PIN.
+ * @Brief Waits for XACTUAL to equal XTARGET.
  * @Param motor: Pointer to an instance of the motor struct.
- * @Param state: desired pin state, 0 = motor on.
+ * @Param position: Desired position in usteps.
  * */
-static void TMC5160_motor_enable(TMC5160_HandleTypeDef *motor, GPIO_PinState state){
-	HAL_GPIO_WritePin(motor->motor_en_port, motor->motor_en_pin, state);
+static TMC5160_return_values_t TMC5160_wait_for_position(TMC5160_HandleTypeDef *motor, int position){
+
+	// Start timer for timeout operations
+	uint32_t startTime = HAL_GetTick();
+
+	// check there are no errors.
+	SPI_Status_t  status = TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
+
+	if(status.Val.BitField.DRIVER_ERROR || status.Val.BitField.SG2){
+		return status.Val.BitField.DRIVER_ERROR ? DRIVER_ERROR : STALL_ERROR;
+	}
+
+	// max time in milliseconds to move the full distance at minimum speed.
+	uint32_t timeout  = 500000;
+
+	while(!status.Val.BitField.POSITION_REACHED){
+		status = TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
+		if((HAL_GetTick() - startTime) > timeout){
+			return POSITION_NOT_REACHED;
+		}
+	}
+	(void)TMC5160_ReadRegister(motor, &motor->registers.XACTUAL.Val.Value, XACTUAL);
+	return TMC5160_SUCCESS;
+
 }
 
 /*
  * @Brief Converts the MRES register to base 10 micro-steps being used.
  * @Param MRES: The value of the micro-steps register.
  * */
-uint16_t tmc_mres_to_microsteps(uint8_t mres)
+static uint16_t tmc_mres_to_microsteps(uint8_t mres)
 {
-    if (mres > 8) {
-        mres = 8; // Clamp invalid MRES to 8 (1 microstep)
-    }
-    return 1 << (8 - mres); // 2^(8 - mres)
+    return 1 << mres;
 }
 
 
