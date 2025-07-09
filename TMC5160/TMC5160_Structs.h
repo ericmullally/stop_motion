@@ -296,9 +296,9 @@ typedef struct __attribute__((packed, aligned(4))) {
 /* 0x21 RW XACTUAL Register Structure 32 Bits */
 typedef struct __attribute__((packed, aligned(4))) {
     union {
-        uint32_t Value;
+        int32_t Value;
         struct __attribute__((packed, aligned(4))) {
-            uint32_t XACTUAL                : 32;
+            int32_t XACTUAL                : 32;
         } BitField;
     } Val;
 } XACTUAL_Register;
@@ -308,7 +308,7 @@ typedef struct __attribute__((packed, aligned(4))) {
     union {
         uint32_t Value;
         struct __attribute__((packed, aligned(4))) {
-            uint32_t VACTUAL                : 24;
+            signed int  VACTUAL                : 24;
             uint32_t RESERVED               : 8;
         } BitField;
     } Val;
@@ -416,9 +416,9 @@ typedef struct __attribute__((packed, aligned(4))) {
 /* 0x2D RW XTARGET Register Structure 32 Bits */
 typedef struct __attribute__((packed, aligned(4))) {
     union {
-        uint32_t Value;
+        int32_t Value;
         struct __attribute__((packed, aligned(4))) {
-            uint32_t XTARGET                : 32;
+            int32_t XTARGET                : 32;
         } BitField;
     } Val;
 } XTARGET_Register;
@@ -688,9 +688,9 @@ typedef struct __attribute__((packed, aligned(4))) {
     union {
         uint32_t Value;
         struct __attribute__((packed, aligned(4))) {
-            uint32_t CUR_A                  : 9;
+            signed int CUR_A                  : 9;
             uint32_t RESERVED               : 7;
-            uint32_t CUR_B                  : 9;
+            signed int CUR_B                  : 9;
             uint32_t RESERVED1              : 7;
         } BitField;
     } Val;
@@ -819,7 +819,7 @@ typedef struct __attribute__((packed, aligned(4))) {
         struct __attribute__((packed, aligned(4))) {
             uint32_t PWM_OFS_AUTO           : 8;
             uint32_t RESERVED0              : 8;
-            uint32_t PWM_GRAD_AUTO          : 8;
+            signed int PWM_GRAD_AUTO          : 8;
             uint32_t RESERVED1              : 8;
         } BitField;
     } Val;
@@ -927,6 +927,7 @@ typedef struct __attribute__((packed, aligned(4))) {
 
 
 typedef struct{
+		uint8_t					ID;
 		GPIO_TypeDef			*motor_en_port;
 		SPI_HandleTypeDef        *spi;
 		uint16_t				 motor_en_pin;
